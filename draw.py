@@ -1,788 +1,511 @@
-#!/usr/bin/env python3
-"""
-THE WORLD IN ONE DAY -- Thursday 19 November 2026 (v2).
-
-Draws a classic broadsheet front page as a 1024x1024 PNG with Pillow:
-a masthead, one large hero scene, 15 illustrated story cards and a set of
-numbered one-line briefs, plus markets, weather and a date-check box.
-Every story was date-verified to Thursday 19 November 2026.
-
-Deterministic: no randomness anywhere; two runs are byte-identical.
-Output: entry.png inside MAKEFUN_OUTPUT_DIR (default /output).
-"""
-
-import math
+# THE WORLD IN ONE DAY - front page for Thursday 19 November 2026.
+# Fresh drawing program (v3): fewer stories, much bigger illustrations.
+# Writes entry.png beside this file and to $MAKEFUN_OUTPUT_DIR if set.
 import os
-
 from PIL import Image, ImageDraw, ImageFont
 
-# ---------------------------------------------------------------- constants
+HERE = os.path.dirname(os.path.abspath(__file__))
+FONT_DIR = os.path.join(HERE, "fonts")
 
-W, H = 1024, 1024
-MARGIN = 22
-CW = W - 2 * MARGIN  # content width = 980
+SANS = "DejaVuSans.ttf"
+SANSB = "DejaVuSans-Bold.ttf"
+SERIFB = "DejaVuSerif-Bold.ttf"
 
-PAPER = (247, 242, 227)
+_font_cache = {}
+
+
+def F(name, size):
+    key = (name, size)
+    if key not in _font_cache:
+        # Raises OSError if the bundled font file is missing - by design,
+        # the wrapper then falls back to the bundled verified image.
+        _font_cache[key] = ImageFont.truetype(os.path.join(FONT_DIR, name), size)
+    return _font_cache[key]
+
+
+PAPER = (247, 241, 227)
 CARD_BG = (255, 253, 246)
 INK = (26, 23, 18)
-FAINT = (96, 87, 66)
-RULE = (122, 109, 82)
-RED = (163, 22, 33)
-GOLD = (176, 141, 62)
+RED = (179, 32, 44)
+MUTED = (107, 98, 82)
+GOLD = (217, 164, 65)
+DARK = (30, 24, 20)
 
-FONT_DIR = "/usr/share/fonts/truetype/dejavu"
-SERIF = os.path.join(FONT_DIR, "DejaVuSerif.ttf")
-SERIF_B = os.path.join(FONT_DIR, "DejaVuSerif-Bold.ttf")
-SANS = os.path.join(FONT_DIR, "DejaVuSans.ttf")
-SANS_B = os.path.join(FONT_DIR, "DejaVuSans-Bold.ttf")
-
-_cache = {}
-
-
-def font(path, size):
-    key = (path, size)
-    if key not in _cache:
-        _cache[key] = ImageFont.truetype(path, size)
-    return _cache[key]
-
-
-# ---------------------------------------------------------------- text utils
+W = 1024
+M = 36
+CW = W - 2 * M  # 952 content width
 
 _probe = ImageDraw.Draw(Image.new("RGB", (8, 8)))
 
 
-def text_w(text, fnt):
-    return _probe.textlength(text, font=fnt)
+def tw(s, f):
+    return _probe.textlength(s, font=f)
 
 
-def fit_line(text, fnt, maxw):
-    """Truncate text with an ellipsis so it fits maxw."""
-    if text_w(text, fnt) <= maxw:
-        return text
-    ell = "…"
-    while text and text_w(text + ell, fnt) > maxw:
-        text = text[:-1]
-    return text.rstrip() + ell
+def fit_size(text, name, max_w, start, floor=9):
+    size = start
+    while size > floor and tw(text, F(name, size)) > max_w:
+        size -= 1
+    return F(name, size)
 
 
-def wrap(text, fnt, maxw, max_lines):
-    """Greedy word wrap into at most max_lines lines (last one ellipsised)."""
+def wrap(text, f, max_w):
     words = text.split()
-    lines = []
-    cur = ""
-    idx = 0
-    while idx < len(words):
-        word = words[idx]
-        trial = word if not cur else cur + " " + word
-        if text_w(trial, fnt) <= maxw:
+    lines, cur = [], ""
+    for wd in words:
+        trial = wd if not cur else cur + " " + wd
+        if tw(trial, f) <= max_w:
             cur = trial
-            idx += 1
         else:
-            lines.append(cur)
-            cur = ""
-            if len(lines) == max_lines:
-                break
-    if cur and len(lines) < max_lines:
+            if cur:
+                lines.append(cur)
+            cur = wd
+    if cur:
         lines.append(cur)
-    if idx < len(words) and lines:
-        lines[-1] = fit_line(lines[-1].rstrip(".") + "…", fnt, maxw)
     return lines
 
 
-def centered(d, cx, y, text, fnt, fill=INK):
-    d.text((cx - text_w(text, fnt) / 2, y), text, font=fnt, fill=fill)
+def fit_lines(text, f, max_w, max_lines):
+    """Wrap text into at most max_lines lines, ellipsising the tail."""
+    lines = wrap(text, f, max_w)
+    if len(lines) <= max_lines:
+        return lines
+    lines = lines[:max_lines]
+    last = lines[-1]
+    while last and tw(last + " …", f) > max_w:
+        last = last[:-1]
+    lines[-1] = last.rstrip() + " …"
+    return lines
 
 
-# ---------------------------------------------------------------- scene kit
-
-def sky_bands(d, w, h, top, bottom, bands=7):
-    for i in range(bands):
-        t = i / max(1, bands - 1)
-        col = tuple(int(top[c] + (bottom[c] - top[c]) * t) for c in range(3))
-        y0 = int(h * i / bands)
-        y1 = int(h * (i + 1) / bands)
-        d.rectangle([0, y0, w, y1], fill=col)
+def fit_one(text, f, max_w):
+    if tw(text, f) <= max_w:
+        return text
+    t = text
+    while t and tw(t + "…", f) > max_w:
+        t = t[:-1]
+    return t.rstrip() + "…"
 
 
-def sun(d, cx, cy, r, col=(250, 205, 90)):
-    d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=col)
+def fit_lines_shrink(text, name, max_w, max_lines, start, floor):
+    """Largest font in start..floor whose wrap fits max_lines. Never ellipsises."""
+    for size in range(start, floor - 1, -1):
+        f = F(name, size)
+        lines = wrap(text, f, max_w)
+        if len(lines) <= max_lines:
+            return f, lines
+    f = F(name, floor)
+    return f, wrap(text, f, max_w)[:max_lines]
 
 
-def person(d, cx, cy, s, col=(30, 30, 34)):
-    """Tiny figure: head + shoulders. cy is the shoulder line."""
-    d.ellipse([cx - s * 0.32, cy - s * 0.95, cx + s * 0.32, cy - s * 0.31], fill=col)
-    d.pieslice([cx - s * 0.62, cy - s * 0.35, cx + s * 0.62, cy + s * 0.85],
-               start=180, end=360, fill=col)
+def fit_one_shrink(text, name, max_w, start, floor):
+    """Largest font in start..floor that fits text on one line. Never ellipsises."""
+    for size in range(start, floor - 1, -1):
+        f = F(name, size)
+        if tw(text, f) <= max_w:
+            return f, text
+    return F(name, floor), text
 
 
-def scene_hero(w, h):
-    im = Image.new("RGB", (w, h), (28, 44, 78))
-    d = ImageDraw.Draw(im)
-    sky_bands(d, w, h, (26, 42, 78), (238, 138, 74))
-    sun(d, int(w * 0.80), int(h * 0.34), 15)
-    # Shenzhen skyline silhouette
-    towers = [(0.02, 0.52, 0.10, 0.30), (0.12, 0.40, 0.07, 0.42),
-              (0.21, 0.58, 0.09, 0.24), (0.66, 0.46, 0.08, 0.36),
-              (0.76, 0.56, 0.10, 0.26), (0.88, 0.42, 0.09, 0.40)]
-    for fx, fy, fw, fh in towers:
-        d.rectangle([w * fx, h * fy, w * (fx + fw), h * (fy + fh)], fill=(18, 24, 40))
-        for k in range(3):
-            d.point((w * (fx + fw * (0.3 + 0.2 * k)), h * (fy + fh * 0.4)),
-                    fill=(250, 220, 130))
-    d.rectangle([0, h * 0.80, w, h], fill=(16, 20, 32))
-    # three flags on poles behind the table
-    pole_x = [int(w * 0.36), int(w * 0.50), int(w * 0.64)]
-    for px in pole_x:
-        d.line([px, h * 0.16, px, h * 0.78], fill=(210, 210, 215), width=2)
-    fw_, fh_ = int(w * 0.115), int(h * 0.30)
-    y0 = int(h * 0.16)
-    # United States: stripes + blue canton
-    x0 = pole_x[0]
-    for i in range(7):
-        col = (178, 34, 52) if i % 2 == 0 else (240, 240, 240)
-        d.rectangle([x0, y0 + fh_ * i / 7, x0 + fw_, y0 + fh_ * (i + 1) / 7], fill=col)
-    d.rectangle([x0, y0, x0 + fw_ * 0.45, y0 + fh_ * 0.54], fill=(60, 59, 110))
-    for r in range(3):
-        for c in range(4):
-            d.point((x0 + 4 + c * 5, y0 + 4 + r * 5), fill=(255, 255, 255))
-    # China: red field, gold stars
-    x0 = pole_x[1]
-    d.rectangle([x0, y0, x0 + fw_, y0 + fh_], fill=(222, 41, 16))
-    d.polygon([(x0 + 8, y0 + 10), (x0 + 12, y0 + 20), (x0 + 2, y0 + 20)],
-              fill=(255, 222, 0))
-    for dx, dy in [(20, 5), (24, 12), (24, 20), (20, 27)]:
-        d.ellipse([x0 + dx, y0 + dy, x0 + dx + 3, y0 + dy + 3], fill=(255, 222, 0))
-    # Russia: white / blue / red
-    x0 = pole_x[2]
-    for i, col in enumerate([(245, 245, 245), (0, 57, 166), (213, 43, 30)]):
-        d.rectangle([x0, y0 + fh_ * i / 3, x0 + fw_, y0 + fh_ * (i + 1) / 3], fill=col)
-    # summit table + three leaders
-    ty = int(h * 0.80)
-    d.rectangle([w * 0.24, ty, w * 0.76, ty + h * 0.13], fill=(96, 62, 34))
-    d.rectangle([w * 0.24, ty, w * 0.76, ty + 3], fill=(150, 108, 58))
-    for fx in (0.36, 0.50, 0.64):
-        person(d, int(w * fx), int(h * 0.80), int(h * 0.34), col=(12, 12, 16))
-    return im
+def vgrad(w, h, stops):
+    """Vertical gradient image. stops = [(pos0to1, (r,g,b)), ...]"""
+    img = Image.new("RGB", (w, h))
+    d = ImageDraw.Draw(img)
+    for y in range(h):
+        p = y / max(1, h - 1)
+        for i in range(len(stops) - 1):
+            p0, c0 = stops[i]
+            p1, c1 = stops[i + 1]
+            if p0 <= p <= p1:
+                t = 0 if p1 == p0 else (p - p0) / (p1 - p0)
+                c = tuple(int(c0[k] + (c1[k] - c0[k]) * t) for k in range(3))
+                break
+        else:
+            c = stops[-1][1]
+        d.line([(0, y), (w, y)], fill=c)
+    return img
+
+
+def centered(d, cx, y, text, f, fill):
+    d.text((cx - tw(text, f) / 2, y), text, font=f, fill=fill)
+
+
+# ---------------------------------------------------------------- scenes
+
+def hero_scene(w, h):
+    """Shenzhen trilateral summit at sunset."""
+    img = vgrad(w, h, [(0.0, (43, 24, 66)), (0.45, (128, 44, 74)),
+                        (0.75, (214, 96, 52)), (1.0, (246, 168, 60))])
+    d = ImageDraw.Draw(img)
+    # sun disc low over the skyline
+    sx, sy, sr = int(w * 0.72), int(h * 0.66), int(h * 0.30)
+    d.ellipse([sx - sr - 10, sy - sr - 10, sx + sr + 10, sy + sr + 10], fill=(250, 190, 90))
+    d.ellipse([sx - sr, sy - sr, sx + sr, sy + sr], fill=(255, 217, 122))
+    # skyline silhouettes
+    sil = (30, 17, 44)
+    base = h
+    buildings = [(0, 46), (52, 70), (112, 40), (168, 84), (232, 54), (292, 66),
+                 (352, 44), (560, 58), (622, 88), (688, 48), (748, 72),
+                 (812, 52), (868, 78), (922, 44)]
+    for bx, bh in buildings:
+        d.rectangle([bx, base - bh, bx + 46, base], fill=sil)
+    # the tall tower (Ping An style) with a spire
+    tx = 452
+    d.rectangle([tx, base - 128, tx + 52, base], fill=sil)
+    d.polygon([(tx + 8, base - 128), (tx + 44, base - 128), (tx + 26, base - 146)], fill=sil)
+    # lit windows on a few buildings
+    for wx, wy in [(70, base - 52), (90, base - 34), (250, base - 40), (640, base - 66),
+                   (660, base - 44), (830, base - 56), (466, base - 96), (466, base - 62)]:
+        d.rectangle([wx, wy, wx + 5, wy + 7], fill=(255, 214, 120))
+    # three flag poles with national flags
+    pole = (240, 235, 225)
+    for i, fx in enumerate((170, 476, 782)):
+        fy = 26
+        d.line([(fx, fy), (fx, 118)], fill=pole, width=3)
+        d.ellipse([fx - 3, fy - 3, fx + 3, fy + 3], fill=GOLD)
+        fw, fh = 46, 28
+        if i == 0:      # United States: stripes + blue canton
+            for s in range(6):
+                col = (178, 34, 52) if s % 2 == 0 else (245, 245, 245)
+                d.rectangle([fx + 2, fy + 2 + s * (fh // 6), fx + 2 + fw, fy + 2 + (s + 1) * (fh // 6)], fill=col)
+            d.rectangle([fx + 2, fy + 2, fx + 2 + fw // 2, fy + 2 + fh // 2], fill=(40, 50, 120))
+        elif i == 1:    # China: red field, yellow stars
+            d.rectangle([fx + 2, fy + 2, fx + 2 + fw, fy + 2 + fh], fill=(206, 32, 40))
+            d.ellipse([fx + 7, fy + 6, fx + 13, fy + 12], fill=(255, 222, 60))
+            for dx, dy in [(16, 4), (18, 9), (16, 14)]:
+                d.ellipse([fx + dx, fy + dy, fx + dx + 3, fy + dy + 3], fill=(255, 222, 60))
+        else:           # Russia: white / blue / red
+            d.rectangle([fx + 2, fy + 2, fx + 2 + fw, fy + 2 + fh // 3], fill=(245, 245, 245))
+            d.rectangle([fx + 2, fy + 2 + fh // 3, fx + 2 + fw, fy + 2 + 2 * fh // 3], fill=(38, 74, 160))
+            d.rectangle([fx + 2, fy + 2 + 2 * fh // 3, fx + 2 + fw, fy + 2 + fh], fill=(206, 32, 40))
+    # foreground: long signing table with three seated silhouettes, one
+    # centred under each flag; gold rim light so they read against both
+    # the bright sunset and the dark skyline
+    fig = (16, 9, 22)
+    rim = (255, 205, 110)
+    ty = h - 30
+    for fx in (170, 476, 782):
+        head = [fx - 11, ty - 36, fx + 11, ty - 14]
+        d.ellipse(head, fill=fig)
+        d.ellipse(head, outline=rim)
+        pts = [(fx - 21, ty + 2), (fx + 21, ty + 2), (fx + 12, ty - 16),
+               (fx - 12, ty - 16)]
+        d.polygon(pts, fill=fig)
+        d.line(pts + [pts[0]], fill=rim, width=2)
+    d.rectangle([60, ty, w - 60, ty + 16], fill=fig)                # table block
+    d.line([(60, ty), (w - 60, ty)], fill=rim, width=2)             # table top edge
+    d.rectangle([0, ty + 16, w, h], fill=fig)                       # foreground ground
+    for fx in (170, 476, 782):
+        d.rectangle([fx - 10, ty + 4, fx + 10, ty + 8], fill=(245, 238, 220))  # papers
+    return img
 
 
 def scene_icj(w, h):
-    im = Image.new("RGB", (w, h), (196, 208, 220))
-    d = ImageDraw.Draw(im)
-    d.rectangle([0, h * 0.78, w, h], fill=(150, 148, 138))
+    img = Image.new("RGB", (w, h), (206, 220, 230))
+    d = ImageDraw.Draw(img)
+    stone = (244, 241, 230)
+    dark = (70, 66, 60)
+    d.rectangle([0, h - 6, w, h], fill=(150, 148, 138))
     cx = w // 2
-    d.polygon([(cx - w * 0.34, h * 0.30), (cx + w * 0.34, h * 0.30), (cx, h * 0.10)],
-              fill=(232, 228, 216))
-    d.rectangle([cx - w * 0.34, h * 0.30, cx + w * 0.34, h * 0.36], fill=(210, 205, 192))
+    d.polygon([(cx - 62, 14), (cx + 62, 14), (cx, 2)], fill=(150, 74, 58))
+    d.rectangle([cx - 62, 15, cx + 62, 19], fill=stone)
     for i in range(5):
-        x = cx - w * 0.28 + i * w * 0.14
-        d.rectangle([x, h * 0.36, x + w * 0.055, h * 0.74], fill=(238, 235, 226))
-    d.rectangle([cx - w * 0.36, h * 0.74, cx + w * 0.36, h * 0.80], fill=(206, 201, 188))
-    # scales of justice in front
-    sx, sy = cx, int(h * 0.50)
-    d.line([sx, sy - 16, sx, sy + 20], fill=(70, 60, 30), width=2)
-    d.line([sx - 20, sy - 12, sx + 20, sy - 12], fill=(70, 60, 30), width=2)
-    for ex in (sx - 20, sx + 20):
-        d.line([ex, sy - 12, ex - 6, sy + 2], fill=(70, 60, 30), width=1)
-        d.line([ex, sy - 12, ex + 6, sy + 2], fill=(70, 60, 30), width=1)
-        d.arc([ex - 8, sy, ex + 8, sy + 12], start=0, end=180, fill=(70, 60, 30),
-              width=2)
-    d.rectangle([sx - 12, sy + 20, sx + 12, sy + 24], fill=(70, 60, 30))
-    return im
+        x = cx - 52 + i * 26
+        d.rectangle([x, 20, x + 9, h - 12], fill=stone, outline=dark)
+    d.rectangle([cx - 66, h - 12, cx + 66, h - 7], fill=stone, outline=dark)
+    d.rectangle([cx - 70, h - 6, cx + 70, h - 2], fill=stone)
+    return img
 
 
 def scene_ipo(w, h):
-    im = Image.new("RGB", (w, h), (14, 26, 44))
-    d = ImageDraw.Draw(im)
-    for i in range(4):
-        y = h * (0.2 + 0.2 * i)
-        d.line([6, y, w - 6, y], fill=(38, 58, 88), width=1)
-    pts = [(8, h * 0.80), (w * 0.25, h * 0.70), (w * 0.42, h * 0.74),
-           (w * 0.60, h * 0.48), (w * 0.78, h * 0.36), (w - 10, h * 0.16)]
-    d.line(pts, fill=(64, 220, 130), width=3)
+    img = Image.new("RGB", (w, h), (14, 20, 24))
+    d = ImageDraw.Draw(img)
+    for gx in range(14, w, 26):
+        d.line([(gx, 2), (gx, h - 2)], fill=(32, 48, 44))
+    for gy in range(8, h, 14):
+        d.line([(2, gy), (w - 2, gy)], fill=(32, 48, 44))
+    pts = [(8, h - 8), (52, h - 14), (88, h - 11), (122, h - 24),
+           (156, h - 21), (188, h - 38), (w - 8, h - 46)]
+    d.line(pts, fill=(53, 199, 89), width=3)
     for px, py in pts:
-        d.ellipse([px - 2, py - 2, px + 2, py + 2], fill=(180, 255, 210))
-    d.polygon([(w - 12, h * 0.16), (w - 24, h * 0.15), (w - 14, h * 0.27)],
-              fill=(64, 220, 130))
-    d.text((10, 8), "ANT", font=font(SANS_B, 17), fill=(240, 244, 250))
-    d.text((52, 10), "+34%", font=font(SANS_B, 15), fill=(64, 220, 130))
-    return im
+        d.ellipse([px - 2, py - 2, px + 2, py + 2], fill=(140, 240, 160))
+    ax, ay = pts[-1]
+    d.polygon([(ax, ay), (ax - 11, ay + 1), (ax - 4, ay + 9)], fill=(53, 199, 89))
+    d.text((8, 3), "ANT +34%", font=F(SANSB, 11), fill=(140, 240, 160))
+    return img
 
 
-def scene_pif(w, h):
-    im = Image.new("RGB", (w, h), (70, 52, 66))
-    d = ImageDraw.Draw(im)
-    sky_bands(d, w, h, (58, 44, 70), (196, 110, 84))
-    d.rectangle([0, h * 0.82, w, h], fill=(30, 24, 30))
-    for fx, fh in [(0.04, 0.34), (0.16, 0.24), (0.80, 0.30), (0.90, 0.20)]:
-        d.rectangle([w * fx, h * (0.82 - fh), w * (fx + 0.09), h * 0.82],
-                    fill=(24, 20, 28))
-    # the tower
-    tx0, tx1 = w * 0.42, w * 0.58
-    d.polygon([(tx0, h * 0.82), (tx0 + 4, h * 0.10), (tx1 - 4, h * 0.10),
-               (tx1, h * 0.82)], fill=(36, 34, 44))
-    for r in range(6):
-        for c in range(3):
-            if (r * 3 + c) % 3 != 0:
-                d.rectangle([tx0 + 6 + c * 8, h * (0.18 + 0.1 * r),
-                             tx0 + 10 + c * 8, h * (0.22 + 0.1 * r)],
-                            fill=(250, 214, 130))
-    # damage smoke
-    for dx, dy, r in [(0.50, 0.16, 10), (0.55, 0.11, 13), (0.61, 0.07, 16)]:
-        d.ellipse([w * dx - r, h * dy - r * 0.6, w * dx + r, h * dy + r * 0.6],
-                  fill=(120, 112, 116))
-    # missile trail
-    d.arc([w * 0.58, -h * 0.30, w * 1.15, h * 0.42], start=95, end=175,
-          fill=(255, 120, 80), width=2)
-    return im
+def scene_riyadh(w, h):
+    img = vgrad(w, h, [(0.0, (46, 32, 66)), (0.7, (150, 70, 60)), (1.0, (214, 110, 60))])
+    d = ImageDraw.Draw(img)
+    tx = w // 2 - 11
+    d.rectangle([tx, 4, tx + 22, h], fill=(34, 26, 44))
+    d.polygon([(tx, 4), (tx + 22, 4), (tx + 11, -4)], fill=(34, 26, 44))
+    for wy in range(10, h - 4, 9):
+        for wx in (tx + 4, tx + 12):
+            d.rectangle([wx, wy, wx + 3, wy + 4], fill=(255, 214, 120))
+    # smoke plume drifting from the crown
+    for i, (ox, oy, r) in enumerate([(16, 2, 7), (30, 0, 9), (48, 1, 11), (68, 3, 12)]):
+        d.ellipse([tx + 22 + ox - r, oy + 2, tx + 22 + ox + r, oy + 2 + r], fill=(120, 112, 118))
+    d.rectangle([0, h - 5, w, h], fill=(24, 18, 32))
+    return img
 
 
 def scene_gaza(w, h):
-    im = Image.new("RGB", (w, h), (168, 158, 142))
-    d = ImageDraw.Draw(im)
-    sky_bands(d, w, h, (150, 142, 128), (196, 186, 168))
-    d.rectangle([0, h * 0.80, w, h], fill=(122, 108, 88))
-    # broken buildings
-    for fx, fh, fw in [(0.03, 0.44, 0.13), (0.80, 0.50, 0.15), (0.66, 0.30, 0.10)]:
-        d.rectangle([w * fx, h * (0.80 - fh), w * (fx + fw), h * 0.80],
-                    fill=(104, 96, 84))
-        d.polygon([(w * fx, h * (0.80 - fh)), (w * (fx + fw * 0.5), h * (0.86 - fh)),
-                   (w * (fx + fw), h * (0.80 - fh))], fill=(168, 158, 142))
-    # tank
-    ty = h * 0.66
-    d.rectangle([w * 0.30, ty, w * 0.66, ty + h * 0.13], fill=(74, 74, 58))
-    d.rectangle([w * 0.40, ty - h * 0.09, w * 0.58, ty], fill=(82, 82, 64))
-    d.line([w * 0.58, ty - h * 0.05, w * 0.80, ty - h * 0.08], fill=(60, 60, 48),
-           width=4)
-    d.rectangle([w * 0.28, ty + h * 0.13, w * 0.68, ty + h * 0.20], fill=(56, 56, 44))
-    for i in range(6):
-        cx = w * (0.32 + 0.058 * i)
-        d.ellipse([cx - 4, ty + h * 0.145, cx + 4, ty + h * 0.185], fill=(40, 40, 32))
-    # smoke
-    for dx, dy, r in [(0.86, 0.22, 9), (0.90, 0.15, 12)]:
-        d.ellipse([w * dx - r, h * dy - r * 0.6, w * dx + r, h * dy + r * 0.6],
-                  fill=(128, 122, 112))
-    return im
+    img = Image.new("RGB", (w, h), (228, 219, 196))
+    d = ImageDraw.Draw(img)
+    # hospital block with red cross
+    d.rectangle([16, 8, 96, h - 10], fill=(250, 250, 246), outline=(120, 112, 96))
+    d.rectangle([48, 13, 64, 29], fill=(196, 40, 48))
+    d.rectangle([53, 8, 59, 34], fill=(250, 250, 246))
+    d.rectangle([50, 16, 62, 22], fill=(196, 40, 48))
+    for wy in (36, 44):
+        for wx in (24, 40, 68, 84):
+            d.rectangle([wx, wy, wx + 6, wy + 5], fill=(150, 160, 165))
+    # tank silhouette in the foreground
+    tk = (52, 48, 44)
+    d.polygon([(118, h - 12), (196, h - 12), (186, h - 24), (128, h - 24)], fill=tk)
+    d.rectangle([146, h - 32, 172, h - 24], fill=tk)
+    d.line([(172, h - 29), (212, h - 33)], fill=tk, width=4)
+    for wx in range(126, 192, 12):
+        d.ellipse([wx, h - 12, wx + 8, h - 4], fill=(30, 28, 26))
+    d.rectangle([0, h - 3, w, h], fill=(168, 156, 130))
+    return img
 
 
 def scene_bridge(w, h):
-    im = Image.new("RGB", (w, h), (150, 190, 214))
-    d = ImageDraw.Draw(im)
-    d.rectangle([0, h * 0.62, w, h], fill=(52, 104, 156))
-    for i in range(5):
-        y = h * (0.70 + 0.06 * i)
-        d.line([w * (0.05 + 0.07 * (i % 2)), y, w * (0.30 + 0.07 * (i % 2)), y],
-               fill=(120, 180, 220), width=2)
-    dy = h * 0.52
-    d.rectangle([0, dy, w, dy + 5], fill=(70, 70, 76))
-    for fx in (0.30, 0.66):
-        d.rectangle([w * fx, h * 0.22, w * fx + 5, dy], fill=(70, 70, 76))
-        d.line([w * fx + 2, h * 0.22, 4, dy], fill=(90, 90, 96), width=1)
-        d.line([w * fx + 2, h * 0.22, w - 4, dy], fill=(90, 90, 96), width=1)
-    # train
-    for i in range(4):
-        d.rectangle([w * (0.08 + 0.07 * i), dy - 9, w * (0.135 + 0.07 * i), dy - 1],
-                    fill=(178, 34, 52))
-    # explosion at mid-span
-    cx, cy = int(w * 0.52), int(dy - 4)
-    for ang in range(0, 360, 30):
-        r1 = 4
-        r2 = 13 + (4 if ang % 90 == 0 else 0)
-        d.line([cx + r1 * math.cos(math.radians(ang)),
-                cy + r1 * math.sin(math.radians(ang)),
-                cx + r2 * math.cos(math.radians(ang)),
-                cy + r2 * math.sin(math.radians(ang))],
-               fill=(255, 150, 40), width=2)
-    d.ellipse([cx - 6, cy - 6, cx + 6, cy + 6], fill=(255, 200, 70))
-    d.ellipse([cx - 8, cy - 26, cx + 10, cy - 12], fill=(140, 134, 128))
-    return im
+    img = vgrad(w, h, [(0.0, (146, 190, 214)), (0.55, (110, 164, 198)), (1.0, (58, 116, 158))])
+    d = ImageDraw.Draw(img)
+    deck = h - 20
+    d.rectangle([0, deck, w, deck + 4], fill=(52, 56, 62))
+    for px in (34, w // 2, w - 40):
+        d.rectangle([px - 3, deck - 20, px + 3, deck + 12], fill=(52, 56, 62))
+    d.arc([10, deck - 30, w - 10, deck + 16], start=180, end=360, fill=(52, 56, 62), width=2)
+    for wx in range(8, w, 22):
+        d.line([(wx, deck + 9), (wx + 10, deck + 12)], fill=(210, 232, 242), width=1)
+    # explosion flash on the deck
+    cx, cy = w // 2 + 28, deck - 8
+    pts = []
+    import math
+    for i in range(16):
+        ang = math.pi * i / 8
+        r = 13 if i % 2 == 0 else 5
+        pts.append((cx + r * math.cos(ang), cy + r * math.sin(ang)))
+    d.polygon(pts, fill=(255, 196, 60), outline=(230, 120, 30))
+    d.ellipse([cx - 3, cy - 3, cx + 3, cy + 3], fill=(255, 240, 190))
+    return img
 
 
-def scene_vangogh(w, h):
-    im = Image.new("RGB", (w, h), (16, 22, 54))
-    d = ImageDraw.Draw(im)
-    # swirling night sky
-    for cx, cy, r in [(0.24, 0.30, 15), (0.55, 0.20, 11), (0.78, 0.38, 13)]:
-        for rr in (r, int(r * 0.62)):
-            d.arc([w * cx - rr, h * cy - rr, w * cx + rr, h * cy + rr],
-                  start=20, end=320, fill=(90, 130, 200), width=2)
-        sun(d, int(w * cx), int(h * cy), 4, col=(250, 224, 130))
-    d.polygon([(0, h), (w * 0.30, h * 0.55), (w * 0.42, h)], fill=(10, 14, 34))
-    d.rectangle([0, h * 0.86, w, h], fill=(24, 34, 44))
-    for i in range(4):
-        d.rectangle([w * (0.55 + 0.09 * i), h * 0.78, w * (0.58 + 0.09 * i), h * 0.86],
-                    fill=(250, 214, 130))
-    # gold frame + price tag
-    d.rectangle([2, 2, w - 3, h - 3], outline=GOLD, width=4)
-    tag = "SOLD $190M"
-    f = font(SANS_B, 12)
-    tw = text_w(tag, f)
-    d.rectangle([w - tw - 16, h - 24, w - 6, h - 6], fill=(245, 240, 228))
-    d.text((w - tw - 11, h - 21), tag, font=f, fill=RED)
-    return im
+def scene_cyclone(w, h):
+    img = Image.new("RGB", (w, h), (38, 96, 108))
+    d = ImageDraw.Draw(img)
+    # coastline
+    d.polygon([(0, h), (0, h - 14), (52, h - 20), (96, h - 8), (128, h), ], fill=(214, 188, 138))
+    d.rectangle([0, h - 3, w, h], fill=(24, 70, 84))
+    # spiral storm
+    cx, cy = w - 58, h // 2 - 2
+    for r, a0 in [(26, 20), (19, 150), (12, 300)]:
+        d.arc([cx - r, cy - r, cx + r, cy + r], start=a0, end=a0 + 250,
+              fill=(235, 244, 240), width=4)
+    d.ellipse([cx - 4, cy - 4, cx + 4, cy + 4], fill=(235, 244, 240))
+    # rain streaks
+    for rx in range(12, w - 90, 16):
+        for ry in (8, 26):
+            d.line([(rx, ry), (rx - 4, ry + 8)], fill=(170, 214, 220), width=2)
+    return img
 
 
-def scene_gta(w, h):
-    im = Image.new("RGB", (w, h), (240, 120, 90))
-    d = ImageDraw.Draw(im)
-    sky_bands(d, w, h, (120, 60, 140), (250, 150, 80))
-    sun(d, int(w * 0.68), int(h * 0.52), 16, col=(255, 220, 130))
-    d.rectangle([0, h * 0.78, w, h], fill=(30, 22, 40))
-    # palms
-    for fx, s in [(0.14, 1.0), (0.86, 0.8)]:
-        bx, by = w * fx, h * 0.82
-        d.line([bx, by, bx + 6 * s, by - h * 0.52 * s], fill=(20, 16, 26), width=3)
-        tx, ty = bx + 6 * s, by - h * 0.52 * s
-        for a in (-50, -20, 10, 40, 70):
-            ex = tx + 20 * s * math.cos(math.radians(a + 180))
-            ey = ty + 12 * s * math.sin(math.radians(a)) + 6
-            d.line([tx, ty, ex, ey + 8], fill=(20, 16, 26), width=2)
-    # sports car silhouette
-    cy = h * 0.80
-    d.polygon([(w * 0.30, cy), (w * 0.38, cy - h * 0.13), (w * 0.55, cy - h * 0.15),
-               (w * 0.66, cy - h * 0.06), (w * 0.70, cy)], fill=(16, 12, 22))
-    d.rectangle([w * 0.28, cy, w * 0.72, cy + h * 0.07], fill=(16, 12, 22))
-    for fx in (0.36, 0.62):
-        d.ellipse([w * fx - 7, cy + h * 0.03, w * fx + 7, cy + h * 0.03 + 14],
-                  fill=(8, 6, 12), outline=(200, 200, 210), width=1)
-    return im
+def scene_utah(w, h):
+    img = Image.new("RGB", (w, h), (168, 188, 208))
+    d = ImageDraw.Draw(img)
+    peaks = [(6, 118, 26), (74, 168, 12), (140, 128, 30)]
+    for x0, x1, top in peaks:
+        mid = (x0 + x1) // 2
+        d.polygon([(x0, h), (mid, top), (x1, h)], fill=(110, 122, 140))
+        d.polygon([(mid - 13, top + 13), (mid, top), (mid + 13, top + 13),
+                   (mid + 5, top + 19), (mid, top + 14), (mid - 5, top + 19)], fill=(250, 252, 255))
+    d.rectangle([0, h - 6, w, h], fill=(244, 248, 252))
+    # deterministic snowfall
+    for i in range(38):
+        sx = (i * 53 + 17) % w
+        sy = (i * 29 + 7) % (h - 8)
+        d.ellipse([sx, sy, sx + 2, sy + 2], fill=(255, 255, 255))
+    return img
 
 
-def scene_cop(w, h):
-    im = Image.new("RGB", (w, h), (178, 216, 200))
-    d = ImageDraw.Draw(im)
-    cx, cy, r = int(w * 0.42), int(h * 0.52), int(h * 0.34)
-    d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(70, 130, 190))
-    d.pieslice([cx - r, cy - r, cx + r, cy + r], start=300, end=60, fill=(96, 170, 96))
-    d.pieslice([cx - r, cy - r, cx + r, cy + r], start=140, end=230,
-               fill=(96, 170, 96))
-    d.pieslice([cx - r, cy - r, cx + r, cy + r], start=80, end=120,
-               fill=(110, 180, 100))
-    # thermometer
-    tx = int(w * 0.78)
-    d.rectangle([tx - 3, h * 0.16, tx + 3, h * 0.66], outline=(90, 90, 90), width=2)
-    d.rectangle([tx - 2, h * 0.30, tx + 2, h * 0.66], fill=RED)
-    d.ellipse([tx - 8, h * 0.62, tx + 8, h * 0.62 + 16], fill=RED)
-    # leaf
-    d.pieslice([w * 0.60, h * 0.58, w * 0.78, h * 0.92], start=270, end=60,
-               fill=(60, 150, 70))
-    return im
+def scene_sport(w, h):
+    img = Image.new("RGB", (w, h), (10, 26, 18))
+    d = ImageDraw.Draw(img)
+    # light cones (drawn first, pale)
+    for fx in (36, w - 36):
+        d.polygon([(fx, 8), (fx - 26, h - 12), (fx + 26, h - 12)], fill=(38, 62, 44))
+    # pitch
+    d.rectangle([0, h - 13, w, h], fill=(34, 120, 62))
+    d.line([(w // 2, h - 13), (w // 2, h)], fill=(220, 240, 220), width=1)
+    d.ellipse([w // 2 - 9, h - 11, w // 2 + 9, h - 3], outline=(220, 240, 220))
+    # floodlight pylons
+    for fx in (36, w - 36):
+        d.line([(fx, h - 12), (fx, 6)], fill=(200, 205, 200), width=2)
+        for lx in (-8, 0, 8):
+            d.ellipse([fx + lx - 2, 3, fx + lx + 2, 7], fill=(255, 250, 200))
+    # ball
+    d.ellipse([w // 2 - 26, h - 22, w // 2 - 16, h - 12], fill=(250, 250, 250))
+    return img
 
 
-def scene_boat(w, h):
-    im = Image.new("RGB", (w, h), (150, 196, 224))
-    d = ImageDraw.Draw(im)
-    sun(d, int(w * 0.82), int(h * 0.24), 12)
-    d.rectangle([0, h * 0.52, w, h], fill=(46, 102, 156))
-    for row in range(3):
-        y = h * (0.60 + 0.13 * row)
-        pts = [(x, y + 3 * math.sin(x / 9.0 + row * 2)) for x in range(0, w, 6)]
-        d.line(pts, fill=(130, 190, 230), width=2)
-    # overloaded boat
-    by = h * 0.52
-    d.polygon([(w * 0.24, by), (w * 0.76, by), (w * 0.68, by + h * 0.16),
-               (w * 0.32, by + h * 0.16)], fill=(120, 72, 40))
-    for i in range(6):
-        person(d, int(w * (0.32 + 0.07 * i)), int(by - 2), int(h * 0.20),
-               col=(40, 34, 30))
-    return im
-
-
-def scene_prague(w, h):
-    im = Image.new("RGB", (w, h), (186, 198, 214))
-    d = ImageDraw.Draw(im)
-    # spires
-    for fx, fh in [(0.10, 0.52), (0.20, 0.40), (0.82, 0.46)]:
-        x = w * fx
-        d.rectangle([x, h * (0.72 - fh), x + w * 0.07, h * 0.72], fill=(70, 74, 86))
-        d.polygon([(x - 2, h * (0.72 - fh)), (x + w * 0.035, h * (0.72 - fh) - 14),
-                   (x + w * 0.07 + 2, h * (0.72 - fh))], fill=(50, 54, 66))
-    d.rectangle([0, h * 0.72, w, h], fill=(120, 116, 108))
-    # crowd with signs
-    for row in range(2):
-        for i in range(8):
-            cx = int(w * (0.08 + 0.105 * i)) + (row * 7) % 11
-            cy = int(h * (0.84 + 0.10 * row))
-            d.ellipse([cx - 4, cy - 9, cx + 4, cy - 1], fill=(40, 38, 40))
-            d.rectangle([cx - 5, cy - 1, cx + 5, cy + 6],
-                        fill=(90 + (i % 3) * 40, 60, 70))
-            if (i + row) % 3 == 0:
-                d.line([cx + 6, cy - 2, cx + 6, cy - 18], fill=(60, 50, 40), width=1)
-                d.rectangle([cx - 2, cy - 26, cx + 14, cy - 17], fill=(245, 242, 230),
-                            outline=(120, 60, 60))
-    return im
-
-
-def scene_chatbot(w, h):
-    im = Image.new("RGB", (w, h), (30, 34, 48))
-    d = ImageDraw.Draw(im)
-    # circuit traces
-    for fx, fy in [(0.08, 0.2), (0.9, 0.3), (0.12, 0.8), (0.88, 0.78)]:
-        d.ellipse([w * fx - 2, h * fy - 2, w * fx + 2, h * fy + 2],
-                  fill=(90, 200, 220))
-        d.line([w * fx, h * fy, w * 0.5, h * fy], fill=(60, 110, 130), width=1)
-    # monitor
-    mx0, my0, mx1, my1 = w * 0.24, h * 0.14, w * 0.76, h * 0.74
-    d.rectangle([mx0, my0, mx1, my1], fill=(16, 20, 30), outline=(150, 160, 175),
-                width=2)
-    d.rectangle([w * 0.46, my1, w * 0.54, my1 + h * 0.10], fill=(150, 160, 175))
-    d.rectangle([w * 0.36, my1 + h * 0.10, w * 0.64, my1 + h * 0.13],
-                fill=(150, 160, 175))
-    # chat bubbles
-    d.rounded_rectangle([mx0 + 8, my0 + 8, mx0 + w * 0.30, my0 + h * 0.20], radius=4,
-                        fill=(52, 120, 180))
-    d.rounded_rectangle([mx1 - w * 0.30, my0 + h * 0.26, mx1 - 8, my0 + h * 0.38],
-                        radius=4, fill=(222, 41, 16))
-    for i in range(3):
-        d.ellipse([mx0 + 12 + i * 8, my0 + h * 0.44, mx0 + 16 + i * 8,
-                   my0 + h * 0.44 + 4], fill=(200, 210, 220))
-    return im
-
-
-def scene_gravity(w, h):
-    im = Image.new("RGB", (w, h), (214, 206, 188))
-    d = ImageDraw.Draw(im)
-    # brick wall in the middle
-    wx0, wx1 = w * 0.42, w * 0.58
-    d.rectangle([wx0, h * 0.10, wx1, h * 0.90], fill=(168, 96, 74))
-    for r in range(6):
-        y = h * (0.10 + 0.133 * r)
-        d.line([wx0, y, wx1, y], fill=(120, 66, 50), width=1)
-        off = (r % 2) * w * 0.04
-        d.line([wx0 + off + w * 0.04, y, wx0 + off + w * 0.04, y + h * 0.133],
-               fill=(120, 66, 50), width=1)
-    # wave arcs on both sides (passing through)
-    for cx, flip in [(w * 0.20, 1), (w * 0.80, -1)]:
-        for r in (8, 15, 22):
-            box = [cx - r, h * 0.5 - r, cx + r, h * 0.5 + r]
-            if flip == 1:
-                d.arc(box, start=300, end=60, fill=(50, 90, 160), width=2)
-            else:
-                d.arc(box, start=120, end=240, fill=(50, 90, 160), width=2)
-    person(d, int(w * 0.16), int(h * 0.86), int(h * 0.26), col=(52, 52, 58))
-    person(d, int(w * 0.84), int(h * 0.86), int(h * 0.26), col=(52, 52, 58))
-    return im
-
-
-def scene_crabs(w, h):
-    im = Image.new("RGB", (w, h), (240, 220, 170))
-    d = ImageDraw.Draw(im)
-    d.rectangle([0, 0, w, h * 0.30], fill=(70, 140, 180))
-    for i in range(3):
-        y = h * (0.08 + 0.08 * i)
-        pts = [(x, y + 2 * math.sin(x / 8.0 + i)) for x in range(0, w, 6)]
-        d.line(pts, fill=(170, 220, 240), width=2)
-
-    def crab(cx, cy, s):
-        d.ellipse([cx - s, cy - s * 0.55, cx + s, cy + s * 0.55], fill=(206, 44, 32))
-        for side in (-1, 1):
-            for k in range(3):
-                d.line([cx + side * s * 0.7, cy + (k - 1) * 2,
-                        cx + side * s * 1.5, cy + (k - 1) * 4 + 3],
-                       fill=(178, 36, 26), width=1)
-            d.arc([cx + side * s * 1.1 - 4, cy - s * 0.9, cx + side * s * 1.1 + 4,
-                   cy - s * 0.1], start=200, end=340, fill=(178, 36, 26), width=2)
-        d.ellipse([cx - 3, cy - s * 0.5, cx - 1, cy - s * 0.5 + 2], fill=(30, 20, 20))
-        d.ellipse([cx + 1, cy - s * 0.5, cx + 3, cy - s * 0.5 + 2], fill=(30, 20, 20))
-
-    for fx, fy, s in [(0.16, 0.55, 9), (0.34, 0.72, 11), (0.52, 0.50, 8),
-                      (0.64, 0.78, 12), (0.82, 0.58, 9), (0.26, 0.86, 8),
-                      (0.74, 0.38, 7), (0.46, 0.90, 9)]:
-        crab(int(w * fx), int(h * fy), s)
-    return im
-
-
-def scene_tanker(w, h):
-    im = Image.new("RGB", (w, h), (164, 196, 216))
-    d = ImageDraw.Draw(im)
-    d.rectangle([0, h * 0.60, w, h], fill=(52, 104, 152))
-    for row in range(2):
-        y = h * (0.70 + 0.14 * row)
-        pts = [(x, y + 3 * math.sin(x / 9.0 + row)) for x in range(0, w, 6)]
-        d.line(pts, fill=(140, 195, 230), width=2)
-    # hull + deck tanks
-    hy = h * 0.56
-    d.polygon([(w * 0.08, hy), (w * 0.92, hy), (w * 0.84, hy + h * 0.14),
-               (w * 0.16, hy + h * 0.14)], fill=(40, 40, 46))
-    d.rectangle([w * 0.08, hy + h * 0.05, w * 0.92, hy + h * 0.075], fill=(178, 34, 52))
-    for i in range(3):
-        d.rectangle([w * (0.20 + 0.18 * i), hy - h * 0.10, w * (0.34 + 0.18 * i), hy],
-                    fill=(196, 200, 204), outline=(120, 124, 128))
-    d.rectangle([w * 0.80, hy - h * 0.22, w * 0.88, hy], fill=(90, 94, 100))
-    for dx, dy, r in [(0.84, 0.16, 8), (0.88, 0.10, 11)]:
-        d.ellipse([w * dx - r, h * dy - r * 0.6, w * dx + r, h * dy + r * 0.6],
-                  fill=(130, 128, 126))
-    return im
-
-
-def scene_han(w, h):
-    im = Image.new("RGB", (w, h), (206, 214, 224))
-    d = ImageDraw.Draw(im)
-    d.rectangle([0, h * 0.80, w, h], fill=(156, 154, 144))
-    cx = w // 2
-    d.polygon([(cx - w * 0.32, h * 0.32), (cx + w * 0.32, h * 0.32), (cx, h * 0.13)],
-              fill=(236, 232, 220))
-    d.rectangle([cx - w * 0.32, h * 0.32, cx + w * 0.32, h * 0.38], fill=(214, 209, 196))
-    for i in range(4):
-        x = cx - w * 0.24 + i * w * 0.155
-        d.rectangle([x, h * 0.38, x + w * 0.05, h * 0.76], fill=(240, 237, 228))
-    d.rectangle([cx - w * 0.34, h * 0.76, cx + w * 0.34, h * 0.82], fill=(210, 205, 192))
-    # taegeuk disc on the pediment
-    r = 9
-    d.ellipse([cx - r, h * 0.185 - r, cx + r, h * 0.185 + r], fill=(205, 46, 58))
-    d.pieslice([cx - r, h * 0.185 - r, cx + r, h * 0.185 + r], start=90, end=270,
-               fill=(0, 71, 160))
-    # gavel
-    gx, gy = int(w * 0.72), int(h * 0.60)
-    d.line([gx - 10, gy + 10, gx + 8, gy - 8], fill=(120, 82, 40), width=3)
-    d.rectangle([gx + 2, gy - 16, gx + 16, gy - 6], fill=(140, 98, 48))
-    d.rectangle([gx - 12, gy + 14, gx + 12, gy + 18], fill=(120, 82, 40))
-    return im
-
-
-# ---------------------------------------------------------------- story data
-
-HERO = {
-    "kicker": "THE TOP STORY — SHENZHEN, CHINA · APEC SUMMIT",
-    "headline": "Trump, Xi and Putin hold first trilateral summit in Shenzhen",
-    "summary": "The three presidents met for 90 minutes at APEC and issued a joint "
-               "“peace declaration” on nuclear risk, UN reform and energy — "
-               "with Ukraine and Europe not in the room.",
-    "caption": "DRAWN: the Shenzhen skyline, three flags, one table — the day's "
-               "defining image.",
-}
-
-# (headline, summary, scene function) -- stories 2..16
 CARDS = [
-    ("World Court: Myanmar guilty of genocide",
-     "First state-genocide verdict ever; reparations ordered.", scene_icj),
-    ("Anthropic's record $81.3bn IPO debut",
-     "Priced at $83, opened $111.50 — up 34% on a jittery day.", scene_ipo),
-    ("Houthi strike damages Riyadh PIF Tower",
-     "Missile hits the Saudi fund's HQ as the Iran war widens.", scene_pif),
-    ("Israeli tanks enter central Gaza",
-     "Hospital strike kills six, incl. a surgeon, near Nuseirat.", scene_gaza),
-    ("Ukraine hits Crimean Bridge again",
-     "Third strike in a week halts rail on the Kerch link.", scene_bridge),
-    ("Van Gogh sells for record $190m",
-     "Nazi-era provenance fails to dent a historic price.", scene_vangogh),
-    ("GTA VI debuts to acclaim",
-     "Rockstar's epic arrives after a 13-year wait since GTA V.", scene_gta),
-    ("COP31 endgame: fossil split",
-     "Phaseout wording, finance and 2035 target unresolved.", scene_cop),
-    ("Boat sinks off Senegal; dozens missing",
-     "About 100 people aboard; search and rescue under way.", scene_boat),
-    ("Prague rallies for free media",
-     "Hundreds of thousands protest a proposed media law.", scene_prague),
-    ("N. Korea unveils AI chatbot",
-     "“Fountain of Wisdom” shown at a Pyongyang IT show.", scene_chatbot),
-    ("A message sent through a wall",
-     "Physicists signal through brick — using gravity itself.", scene_gravity),
-    ("Red crabs begin great march",
-     "Millions cross Christmas Island toward the sea.", scene_crabs),
-    ("LPG tanker sinks off Bulgaria",
-     "Gas Husky downed by a projectile in the Black Sea.", scene_tanker),
-    ("Seoul court clears ex-PM Han",
-     "Martial-law conviction overturned by Supreme Court.", scene_han),
+    (scene_icj, "WORLD COURT: MYANMAR GENOCIDE VERDICT", "Historic first ruling, 9-6"),
+    (scene_ipo, "ANTHROPIC IPO OPENS +34% ON DEBUT", "Record $81.3bn Nasdaq listing"),
+    (scene_riyadh, "HOUTHI ATTACK DAMAGES PIF TOWER", "Hits Saudi wealth fund HQ"),
+    (scene_gaza, "TANKS ENTER GAZA; HOSPITAL HIT", "Nasser Hospital strike kills 6"),
+    (scene_bridge, "UKRAINE HITS CRIMEAN BRIDGE AGAIN", "Third strike in a week"),
+    (scene_cyclone, "CYCLONE AKVAN: 72,000 EVACUATED", "Severe storm nears landfall"),
+    (scene_utah, "UTAH SNOWSTORM DROPS 18 INCHES", "Mountain towns dig out"),
+    (scene_sport, "CHELSEA BEAT PSG 1-0 IN EUROPE", "Buurman's 87' winner seals it"),
 ]
 
-# (section tag for the first brief of a group, one-line text) -- stories 17..48
 BRIEFS = [
-    ("AMERICAS", "US targets $16bn EPA grants"),
-    (None, "FDA sets up biologics safety council"),
-    (None, "Kushner firm quietly bought defence shares"),
-    (None, "El Salvador sends 2,500 troops to Haiti mission"),
-    ("EUROPE", "Denmark–Greenland–US Arctic deal"),
-    (None, "Estonia to shut Russia border posts in Dec"),
-    (None, "General strike disrupts Spanish ports"),
-    (None, "AI-run cyberattack hit EU in Oct, official says"),
-    ("ASIA-PACIFIC", "Xi pitches deeper APEC ties"),
-    (None, "Japan PM Takaichi holds talks with Putin"),
-    (None, "Seoul's Lee renews call for Pyongyang talks"),
-    (None, "Indonesia passes asset-forfeiture law"),
-    (None, "One dead in Indonesian refinery blast"),
-    ("MIDDLE EAST", "3 tankers ablaze in Hormuz"),
-    (None, "Palestinian kids: third of child violations"),
-    ("AFRICA", "Kenya picks US minerals consortium"),
-    (None, "Nigeria Senate seeks justice for 37 miners"),
-    (None, "RSF commander defects to Sudan's army"),
-    (None, "Ebola response in DR Congo hit by insecurity"),
-    ("ECONOMY", "UniCredit wins Berlin backing"),
-    (None, "Walmart lifts outlook for third time"),
-    (None, "Traders price in a December Fed hike"),
-    (None, "Nvidia fades after earnings"),
-    ("SCIENCE", "Data-centre CO2 may jump 70%"),
-    (None, "Pregnancy brain changes may key MS cure"),
-    ("CLIMATE", "Indonesia fire emissions spike"),
-    (None, "Fiji declares El Niño drought disaster"),
-    ("SPORT", "Chelsea edge PSG 1–0 in Women's CL"),
-    (None, "France, Qatar win at U-17 World Cup"),
-    (None, "Portugal top group in five-goal thriller"),
-    ("CULTURE", "Actor Stacy Keach dies at 85"),
-    (None, "Ramsay unveils Hollywood Walk of Fame star"),
+    "Trump asks top court to scrap EPA climate grants",
+    "El Salvador sends 2,500 troops to Haiti mission",
+    "Denmark, Greenland, US sign Arctic security deal",
+    "Huge Prague rally defends media independence",
+    "Japan's Takaichi holds direct talks with Putin",
+    "Seoul top court clears ex-PM Han in martial-law case",
+    "Indonesia lets state seize graft assets, no trial",
+    "Three tankers reported ablaze in Strait of Hormuz",
+    "Arab League condemns attacks on Gaza hospitals",
+    "Dozens missing as migrant boat sinks off Senegal",
+    "RSF commander defects to Sudan's army in civil war",
+    "Walmart raises outlook for third time this year",
+    "UniCredit wins backing for Commerzbank takeover",
+    "Physicists send a message through a wall by gravity",
+    "Data-centre emissions may jump 70% by 2030 - IEA",
+    "Van Gogh with Nazi-era past sells for record $190m",
 ]
 
-DATE_CHECKS = [
-    "Hegseth US–Venezuela pact — Wed 18 Nov",
-    "Sanon guilty in Moïse plot — 18 Nov",
-    "Google Gemini 4 “Neon” launch — 18 Nov",
-    "Anthropic IPO priced $83 — 18 Nov",
-    "Trump “dirty bomb” remark — 18 Nov",
-    "Cyclone Akvan landfall — due Fri 20 Nov",
+TRAPS = [
+    "Hegseth US-Venezuela pact - 18 Nov",
+    "Sanon convicted over Moise plot - 18 Nov",
+    "Anthropic IPO priced at $83 - 18 Nov",
+    "Gemini 4 'Neon' launch - 18 Nov",
 ]
 
-MARKET_LINES = [
-    "THU CLOSES: Nikkei 59,444.21 +0.71% · Kospi 5,137.89 +1.39% · Hang Seng 22,841.62 "
-    "−1.95% · ASX 8,730.4 −1.04% · STOXX −0.88% · FTSE −0.93% · DAX −1.06% · CAC −0.81%",
-    "US WED CLOSE (REPORTED THU): S&P 7,323.63 −0.23% · Dow 50,198.17 −1.11% · Nasdaq "
-    "24,429.88 +0.42% · EUR/USD 1.0967 · BTC $63,478.72 −2.18% · BRENT (THU) ~$93.50",
-]
+HERO_HEAD = "TRUMP, XI AND PUTIN SIGN PEACE DECLARATION AT SHENZHEN SUMMIT"
+HERO_DEK = ("The three rivals met face-to-face for 90 minutes at APEC - a first in "
+            "modern diplomacy - pledging talks on nuclear risks, UN reform and "
+            "stable energy flows. No deal on Ukraine; Kyiv was not in the room.")
 
-WEATHER_LINE = ("WEATHER — Cyclone Akvan nears India: 72,000 evacuated, landfall Fri "
-                "20 Nov · Utah: 18in+ early snow · Fiji drought disaster · Indonesia's "
-                "worst fire season in years")
-
-N_STORIES = 1 + len(CARDS) + len(BRIEFS)
-N_SCENES = 1 + len(CARDS)
+MKT_1 = "NIKKEI 59,444.21 +0.71% \u00b7 HANG SENG 22,841.62 -1.95% \u00b7 STOXX 600 -0.88%"
+MKT_2 = "BRENT ~$93.50 +~1.3% \u00b7 EUR/USD 1.0967 -0.24% \u00b7 BITCOIN $63,478.72 -2.18%"
 
 
-# ---------------------------------------------------------------- page build
+def build_page():
+    img = Image.new("RGB", (W, W), PAPER)
+    d = ImageDraw.Draw(img)
+    cx = W // 2
 
-def draw_masthead(d):
-    d.line([MARGIN, 10, W - MARGIN, 10], fill=INK, width=2)
-    d.line([MARGIN, 13, W - MARGIN, 13], fill=INK, width=1)
-    centered(d, W // 2, 17, "THE WORLD IN ONE DAY", font(SERIF_B, 46))
-    centered(d, W // 2, 67, "THURSDAY 19 NOVEMBER 2026", font(SANS_B, 31), fill=RED)
-    strap = "%d STORIES · 5 CONTINENTS · ONE FRONT PAGE" % N_STORIES
-    centered(d, W // 2, 103, strap, font(SANS_B, 13), fill=FAINT)
-    centered(d, W // 2, 119, fit_line(WEATHER_LINE, font(SANS, 11), CW),
-             font(SANS, 11), fill=FAINT)
-    d.line([MARGIN, 135, W - MARGIN, 135], fill=INK, width=3)
+    # ---- masthead
+    f_title = fit_size("THE WORLD IN ONE DAY", SERIFB, CW, 64)
+    centered(d, cx, 12, "THE WORLD IN ONE DAY", f_title, INK)
+    d.rectangle([M, 82, W - M, 87], fill=RED)
+    d.rectangle([M, 90, W - M, 91], fill=INK)
+    f_date = fit_size("THURSDAY 19 NOVEMBER 2026", SANSB, CW, 40)
+    centered(d, cx, 96, "THURSDAY 19 NOVEMBER 2026", f_date, RED)
+    d.rectangle([M, 142, W - M, 143], fill=INK)
+    centered(d, cx, 148, "76 stories verified for this date \u00b7 One front page",
+             F(SANS, 15), MUTED)
+    d.rectangle([M, 170, W - M, 171], fill=INK)
 
+    # ---- hero
+    img.paste(hero_scene(CW, 158), (M, 178))
+    d.rectangle([M, 178, W - M - 1, 178 + 158 - 1], outline=INK, width=2)
+    f_hh, hh_lines = fit_lines_shrink(HERO_HEAD, SANSB, CW, 2, 31, 24)
+    y = 344
+    for ln in hh_lines:
+        centered(d, cx, y, ln, f_hh, INK)
+        y += 34
+    f_dek, dek_lines = fit_lines_shrink(HERO_DEK, SANS, CW, 2, 17, 13)
+    y = 416
+    for ln in dek_lines:
+        centered(d, cx, y, ln, f_dek, (58, 52, 44))
+        y += 19
+    d.rectangle([M, 458, W - M, 460], fill=RED)
 
-def draw_hero(d, page):
-    y = 141
-    scene = scene_hero(500, 140)
-    page.paste(scene, (MARGIN, y))
-    d.rectangle([MARGIN, y, MARGIN + 500, y + 140], outline=RULE, width=1)
-    d.text((MARGIN, y + 143), fit_line(HERO["caption"], font(SANS, 11), 500),
-           font=font(SANS, 11), fill=FAINT)
-    x = MARGIN + 516
-    tw = W - MARGIN - x
-    d.rectangle([x, y + 2, x + 26, y + 28], fill=RED)
-    d.text((x + 8, y + 7), "1", font=font(SANS_B, 15), fill=(255, 255, 255))
-    d.text((x + 34, y + 8), HERO["kicker"], font=font(SANS_B, 12), fill=RED)
-    hy = y + 32
-    for line in wrap(HERO["headline"], font(SERIF_B, 26), tw, 3):
-        d.text((x, hy), line, font=font(SERIF_B, 26), fill=INK)
-        hy += 28
-    sy = y + 120
-    for line in wrap(HERO["summary"], font(SANS, 14), tw, 3):
-        d.text((x, sy), line, font=font(SANS, 14), fill=INK)
-        sy += 17
+    # ---- cards, 2 rows of 4
+    card_w, card_h, gap = 230, 104, 10
+    top = 470
+    for idx, (scene_fn, head, dek) in enumerate(CARDS):
+        r, c = divmod(idx, 4)
+        x = M + c * (card_w + gap)
+        yy = top + r * (card_h + 6)
+        d.rectangle([x, yy, x + card_w - 1, yy + card_h - 1], fill=CARD_BG, outline=INK, width=1)
+        img.paste(scene_fn(card_w - 12, 42), (x + 6, yy + 5))
+        f_ch, ch_lines = fit_lines_shrink(head, SANSB, card_w - 14, 2, 15, 11)
+        ly = yy + 52
+        for ln in ch_lines:
+            d.text((x + 7, ly), ln, font=f_ch, fill=INK)
+            ly += 16
+        f_cd, dek_txt = fit_one_shrink(dek, SANS, card_w - 14, 12, 9)
+        d.text((x + 7, yy + 88), dek_txt, font=f_cd, fill=MUTED)
 
+    # ---- briefs, two columns of 8
+    by = 696
+    d.text((M, by), "THE DAY IN BRIEF", font=F(SANSB, 19), fill=INK)
+    d.rectangle([M, by + 24, W - M, by + 25], fill=INK)
+    f_bn = F(SANSB, 15)
+    col_w = 470
+    for i, b in enumerate(BRIEFS):
+        col, row = divmod(i, 8)
+        x = M + col * (col_w + 12)
+        yy = by + 33 + row * 18
+        num = "%d." % (i + 1)
+        d.text((x, yy), num, font=f_bn, fill=RED)
+        f_br, b_txt = fit_one_shrink(b, SANS, col_w - 34, 15, 12)
+        d.text((x + tw(num, f_bn) + 6, yy), b_txt, font=f_br, fill=INK)
 
-def draw_cards(d, page):
-    y0 = 313
-    cols = 5
-    gap_x, gap_y = 8, 6
-    card_w = (CW - (cols - 1) * gap_x) // cols  # 189
-    card_h = 152
-    scene_w, scene_h = card_w - 16, 90
-    num = 2
-    for idx, (headline, summary, scene_fn) in enumerate(CARDS):
-        r, c = divmod(idx, cols)
-        x = MARGIN + c * (card_w + gap_x)
-        y = y0 + r * (card_h + gap_y)
-        d.rectangle([x, y, x + card_w, y + card_h], fill=CARD_BG, outline=RULE,
-                    width=1)
-        scene = scene_fn(scene_w, scene_h)
-        page.paste(scene, (x + 8, y + 5))
-        label = str(num)
-        chip_w = 8 + text_w(label, font(SANS_B, 11))
-        d.rectangle([x + 8, y + 5, x + 8 + chip_w, y + 22], fill=RED)
-        d.text((x + 12, y + 7), label, font=font(SANS_B, 11), fill=(255, 255, 255))
-        ty = y + 99
-        for line in wrap(headline, font(SERIF_B, 13), card_w - 14, 2):
-            d.text((x + 7, ty), line, font=font(SERIF_B, 13), fill=INK)
-            ty += 14
-        sy = y + 128
-        for line in wrap(summary, font(SANS, 11), card_w - 14, 2):
-            d.text((x + 7, sy), line, font=font(SANS, 11), fill=FAINT)
-            sy += 12
-        num += 1
+    # ---- date check box
+    dy = 880
+    d.rectangle([M, dy, W - M, dy + 44], outline=INK, width=1)
+    d.text((M + 12, dy + 6), "DATE CHECK", font=F(SANSB, 13), fill=RED)
+    d.text((M + 12, dy + 24), "NOT 19 NOV:", font=F(SANSB, 12), fill=INK)
+    f_tr = F(SANS, 12)
+    for i, t in enumerate(TRAPS):
+        col, row = divmod(i, 2)
+        x = M + 150 + col * 400
+        yy = dy + 7 + row * 18
+        d.text((x, yy), fit_one(t, f_tr, 392), font=f_tr, fill=(58, 52, 44))
 
+    # ---- footer line
+    foot = ("All stories happened or were first reported on Thursday 19 November 2026 "
+            "\u00b7 Drawn by program \u00b7 Page 1 of 1")
+    centered(d, cx, 934, foot, fit_size(foot, SANS, CW, 10), MUTED)
 
-def draw_briefs(d):
-    y = 784
-    d.text((MARGIN, y), "IN BRIEF — THE REST OF THURSDAY", font=font(SANS_B, 12),
-           fill=INK)
-    d.line([MARGIN, y + 16, W - MARGIN, y + 16], fill=RULE, width=1)
-    y += 22
-    cols_x = [MARGIN, MARGIN + 331, MARGIN + 662]
-    col_w = 318
-    groups = [BRIEFS[:11], BRIEFS[11:22], BRIEFS[22:]]
-    num = 2 + len(CARDS)  # hero = 1, cards = 2..16, first brief = 17
-    f_num = font(SANS_B, 12)
-    f_txt = font(SANS, 12)
-    f_tag = font(SANS_B, 12)
-    for ci, group in enumerate(groups):
-        x = cols_x[ci]
-        cy = y
-        for tag, text in group:
-            label = "%d." % num
-            d.text((x, cy), label, font=f_num, fill=RED)
-            tx = x + text_w(label, f_num) + 5
-            if tag:
-                d.text((tx, cy), tag + " — ", font=f_tag, fill=INK)
-                tx += text_w(tag + " — ", f_tag)
-            d.text((tx, cy), fit_line(text, f_txt, x + col_w - tx), font=f_txt,
-                   fill=INK)
-            cy += 13
-            num += 1
-
-
-def draw_datecheck(d):
-    y = 952
-    d.rectangle([MARGIN, y, W - MARGIN, y + 36], fill=(250, 236, 224), outline=RED,
-                width=1)
-    d.text((MARGIN + 8, y + 2), "DATE CHECK — NOT 19 NOVEMBER NEWS:",
-           font=font(SANS_B, 10), fill=RED)
-    f_i = font(SANS, 10)
-    cols_x = [MARGIN + 8, MARGIN + 338, MARGIN + 668]
-    for i, item in enumerate(DATE_CHECKS):
-        cx = cols_x[i % 3]
-        cy = y + 14 + (i // 3) * 11
-        d.text((cx, cy), fit_line(item, f_i, MARGIN + CW - cx - 4), font=f_i,
-               fill=INK)
-
-
-def draw_bottom_strip(d):
-    y = 991
-    d.line([MARGIN, y, W - MARGIN, y], fill=INK, width=2)
-    f = font(SANS, 10)
-    yy = y + 4
-    for line in MARKET_LINES:
-        centered(d, W // 2, yy, fit_line(line, f, CW), f, fill=INK)
-        yy += 11
-    stats = ("%d STORIES · 10 SECTIONS · %d DRAWN SCENES · EVERY STORY DATE-VERIFIED "
-             "TO THURSDAY 19 NOVEMBER 2026" % (N_STORIES, N_SCENES))
-    centered(d, W // 2, yy, fit_line(stats, font(SANS_B, 10), CW), font(SANS_B, 10),
-             fill=RED)
+    # ---- markets band (last element; band bottom 1006, paper margin 18)
+    my = 952
+    d.rectangle([M, my, W - M, my + 54], fill=DARK)
+    centered(d, cx, my + 5, "MARKETS \u00b7 AS REPORTED 19 NOV", F(SANSB, 10), GOLD)
+    f_mk = fit_size(MKT_1, SANSB, CW - 30, 15)
+    centered(d, cx, my + 20, MKT_1, f_mk, PAPER)
+    centered(d, cx, my + 37, MKT_2, f_mk, PAPER)
+    return img
 
 
 def main():
-    page = Image.new("RGB", (W, H), PAPER)
-    d = ImageDraw.Draw(page)
-    draw_masthead(d)
-    draw_hero(d, page)
-    draw_cards(d, page)
-    draw_briefs(d)
-    draw_datecheck(d)
-    draw_bottom_strip(d)
-    out_dir = os.environ.get("MAKEFUN_OUTPUT_DIR", "/output")
-    os.makedirs(out_dir, exist_ok=True)
-    page.save(os.path.join(out_dir, "entry.png"), format="PNG")
+    img = build_page()
+    targets = []
+    out_dir = os.environ.get("MAKEFUN_OUTPUT_DIR")
+    if out_dir:
+        targets.append(os.path.join(out_dir, "entry.png"))
+    targets.append(os.path.join(HERE, "entry.png"))
+    saved = False
+    for path in targets:
+        try:
+            img.save(path, "PNG")
+            saved = True
+        except OSError:
+            pass
+    if not saved:
+        raise OSError("draw.py: no writable output path for entry.png")
 
 
-if __name__ == "__main__":
-    main()
+main()
